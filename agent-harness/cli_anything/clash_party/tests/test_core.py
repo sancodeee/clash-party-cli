@@ -21,7 +21,11 @@ from cli_anything.clash_party.core.models import (
     ConfigPathError,
     InvalidConfiguration,
 )
-from cli_anything.clash_party.core.output import error_envelope, success_envelope
+from cli_anything.clash_party.core.output import (
+    error_envelope,
+    redact,
+    success_envelope,
+)
 from cli_anything.clash_party.utils.paths import (
     PathContext,
     detect_portable_data_dir,
@@ -39,6 +43,18 @@ def test_success_envelope_has_stable_structure():
         "command": "version",
         "data": {"cli": "0.1.0"},
         "error": None,
+    }
+
+
+def test_redact_hides_nested_secrets():
+    value = {
+        "authToken": "token",
+        "nested": {"webdavPassword": "password", "mode": "rule"},
+    }
+
+    assert redact(value) == {
+        "authToken": "***",
+        "nested": {"webdavPassword": "***", "mode": "rule"},
     }
 
 

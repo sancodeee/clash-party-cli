@@ -1,47 +1,38 @@
 # Clash Party CLI Harness
 
-## Target Software
+## Target
 
-- **Name**: Clash Party (Mihomo Party)
-- **Source**: `D:\workspace\clash-party`
-- **Type**: Electron-based GUI for the Mihomo proxy core
-- **Configuration**: YAML files in a platform-specific data directory
+- Source reference: `D:\workspace\clash-party`
+- Local installation detected from running Clash Party processes
+- Data format: Clash Party `config.yaml`, `mihomo.yaml`, and `profile.yaml`
+- Runtime backend: Mihomo REST API over TCP or the Clash Party Windows named pipe
 
 ## Architecture
 
-The harness wraps Clash Party's YAML configuration files directly, providing a
-scriptable CLI for configuration management. It does not require the Clash Party
-GUI to be running.
+The harness is an independent Python project. The Clash Party source tree is
+read-only and is not a runtime dependency.
 
-### Key Design Decisions
+| Module | Responsibility |
+| --- | --- |
+| `clash_party_cli.py` | Click commands and default REPL |
+| `core/config_store.py` | Atomic YAML, profiles, backups |
+| `core/core_manager.py` | CLI-owned Mihomo lifecycle |
+| `core/platform_proxy.py` | Windows system proxy |
+| `core/output.py` | JSON envelopes and redaction |
+| `utils/clash_party_backend.py` | TCP and named-pipe Mihomo API |
+| `utils/paths.py` | Data, state, install, and core discovery |
 
-1. **Backend**: Operates directly on YAML files (config.yaml, mihomo.yaml,
-   profile.yaml) rather than wrapping the Electron app or Mihomo REST API.
-2. **Path Resolution**: Follows Clash Party's documented data directory
-   precedence (explicit → env → portable → platform default).
-3. **Atomic Writes**: All file mutations use temp-file → os.replace to prevent
-   corruption.
-4. **Persistent Undo**: Mutations are stored in the state directory, allowing
-   undo/redo across CLI invocations.
+## Ownership
 
-### Module Map
+- GUI-owned Mihomo processes are discovered and controlled through their API.
+- The CLI never terminates a GUI-owned process.
+- A CLI-owned process is recorded with PID and process creation time before it
+  can be stopped or restarted.
 
-| Module | Purpose |
-|--------|---------|
-| `clash_party_cli.py` | Click CLI entry point, commands, REPL |
-| `core/models.py` | Domain models (CliError, FileMutation, ValidationResult) |
-| `core/output.py` | JSON/human output envelopes |
-| `core/config_store.py` | YAML read/write/validate/export |
-| `utils/paths.py` | Cross-platform path resolution |
+## Limitations
 
-## Operation Modes
-
-### Configuration Management
-The harness is designed for headless/scripted configuration management
-scenarios where the user wants to modify Clash Party YAML files without
-opening the GUI.
-
-### Known Limitations
-- Does not interface with the running Mihomo core's REST API
-- Does not manage the Clash Party process lifecycle
-- No Mihomo subscription/profile download support (operates on local files only)
+- Generated work configuration must already exist. Open Clash Party once if
+  `work/config.yaml` is missing.
+- Windows manual system proxy mode is supported. PAC and non-Windows system
+  proxy mutation are not implemented.
+- Clash Party's TypeScript override and Smart Core generators are not ported.

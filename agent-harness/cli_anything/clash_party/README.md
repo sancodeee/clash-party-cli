@@ -1,142 +1,100 @@
 # Clash Party CLI
 
-Scriptable CLI harness for [Clash Party](https://github.com/mihomo-party-org/mihomo-party) (Mihomo Party).
+Local CLI-Anything harness for the installed Clash Party application.
 
-## Prerequisites
+Source reference: `D:\workspace\clash-party`
 
-Enable the Mihomo REST API from the GUI or edit mihomo.yaml:
+The CLI automatically detects:
 
-```yaml
-# Required for real-time control (proxy switch, reload, logs, etc.)
-external-controller: "127.0.0.1:9090"
-```
+- Data: `%APPDATA%\mihomo-party`
+- Installed core from a running Clash Party process
+- The running GUI Mihomo named pipe on Windows
+- CLI state: `%LOCALAPPDATA%\cli-anything-clash-party`
 
-Then restart Clash Party.
+## Install
 
-## Quick Start
-
-```bash
-pip install -e agent-harness/
+```powershell
+cd D:\workspace\clash-party-cli
+python -m pip install -e "agent-harness[dev]"
 cli-anything-clash-party --help
 ```
 
-## Usage
+## Common Commands
 
-### One-shot commands
-
-```bash
-# Show version
-cli-anything-clash-party version
-
-# Read a config value by dot-path
-cli-anything-clash-party --data-dir /path/to/data config get mode
-cli-anything-clash-party --data-dir /path/to/data config get tun.enable
-
-# Set a config value
-cli-anything-clash-party --data-dir /path/to/data config set tun.enable true
-
-# Validate all configuration files
-cli-anything-clash-party --data-dir /path/to/data config validate
-
-# Export mihomo.yaml
-cli-anything-clash-party --data-dir /path/to/data config export /tmp/backup.yaml
-
-# Replace a YAML file
-cli-anything-clash-party --data-dir /path/to/data config replace profile.yaml "current: my-profile
-items: []"
-
-# Undo / redo the last mutation
-cli-anything-clash-party --data-dir /path/to/data --state-dir /tmp/state undo
-cli-anything-clash-party --data-dir /path/to/data --state-dir /tmp/state redo
-
-# Show resolved paths
-cli-anything-clash-party --data-dir /path/to/data info
+```powershell
+cli-anything-clash-party --json status
+cli-anything-clash-party mode get
+cli-anything-clash-party mode set rule
+cli-anything-clash-party proxy list
+cli-anything-clash-party proxy switch "GLOBAL" "DIRECT"
+cli-anything-clash-party provider list proxy
+cli-anything-clash-party connection list
+cli-anything-clash-party --yes connection close-all
+cli-anything-clash-party rule list
+cli-anything-clash-party tun status
+cli-anything-clash-party sysproxy status
 ```
 
-### JSON output
+## Profiles and Backups
 
-All commands support `--json` for machine-readable output:
+```powershell
+cli-anything-clash-party profile list
+cli-anything-clash-party profile add --name Local --file D:\config.yaml
+cli-anything-clash-party profile add --name Remote --url https://example.com/sub
+cli-anything-clash-party profile update PROFILE_ID
+cli-anything-clash-party profile use PROFILE_ID
+cli-anything-clash-party --yes profile remove PROFILE_ID
 
-```bash
-cli-anything-clash-party --json --data-dir /path/to/data config get mode
-# {"command":"config.get","data":{"path":"mode","value":"rule"},"error":null,"ok":true}
+cli-anything-clash-party backup create D:\backup.zip
+cli-anything-clash-party backup list D:\
+cli-anything-clash-party --yes backup restore D:\backup.zip
 ```
 
-### REPL mode
+## Core Management
 
-Run without a subcommand to enter interactive mode:
+`core start` prefers the running GUI instance. It never stops a GUI-owned core.
+When the GUI is not running, it validates the generated `work/config.yaml` and
+starts a CLI-owned Mihomo process.
 
-```bash
-cli-anything-clash-party --data-dir /path/to/data
-# Clash Party CLI REPL — type help for commands, exit to quit.
-# clash-party>
+```powershell
+cli-anything-clash-party core start
+cli-anything-clash-party core logs --lines 100
+cli-anything-clash-party core restart
+cli-anything-clash-party core stop
+cli-anything-clash-party core upgrade
 ```
+
+## Configuration and History
+
+```powershell
+cli-anything-clash-party config get tun.enable
+cli-anything-clash-party config set tun.enable true
+cli-anything-clash-party config validate
+cli-anything-clash-party config export D:\mihomo.yaml
+cli-anything-clash-party undo
+cli-anything-clash-party redo
+```
+
+Configuration writes are atomic. The CLI keeps at most 20 undo records and
+redacts token, password, authorization, and secret fields from output.
 
 ## Global Options
 
-| Option | Env Var | Description |
-|--------|---------|-------------|
-| `--data-dir` | `CLASH_PARTY_DATA_DIR` | Clash Party data directory |
-| `--state-dir` | `CLASH_PARTY_CLI_STATE_DIR` | CLI state directory (mutations, history) |
-| `--core-path` | `CLASH_PARTY_CORE_PATH` | Path to mihomo executable |
-| `--json` | — | Emit JSON output |
+| Option | Environment variable | Purpose |
+| --- | --- | --- |
+| `--data-dir` | `CLASH_PARTY_DATA_DIR` | Override Clash Party data |
+| `--state-dir` | `CLASH_PARTY_CLI_STATE_DIR` | Override CLI state |
+| `--core-path` | `CLASH_PARTY_CORE_PATH` | Override Mihomo executable |
+| `--json` | | Emit one JSON object |
+| `--yes` | | Confirm destructive actions |
+| `--no-start` | | Prevent independent core startup |
 
-## Commands
+Run without a subcommand to enter the persistent REPL.
 
-### `version`
-Show CLI harness version.
+## Limitations
 
-### `config get [PATH]`
-Read a value from `mihomo.yaml` by dot-path. Omitting PATH prints the full document.
-
-### `config set PATH YAML_VALUE`
-Set a dot-path value in `mihomo.yaml`. The value is parsed as YAML.
-
-### `config validate`
-Validate all YAML configuration files.
-
-### `config export DESTINATION`
-Atomically copy `mihomo.yaml` to a destination.
-
-### `config replace NAME TEXT`
-Replace a named YAML file (`mihomo.yaml`, `profile.yaml`, or `config.yaml`).
-Use `--file` to read content from a file.
-
-### `undo` / `redo`
-Undo or redo the last configuration mutation. Mutations are persisted to the state directory.
-
-### `info`
-Show resolved paths.
-
-## Real-time Control (requires `external-controller`)
-
-### `proxy list`
-List all proxy groups with their current node.
-
-### `proxy switch GROUP NAME`
-Switch a proxy group to a specific node.
-
-### `connection list`
-List active connections with host, traffic, and rule.
-
-### `connection close ID`
-Close a single connection.
-
-### `connection close-all`
-Close all active connections.
-
-### `reload [--path PATH]`
-Hot-reload the running Mihomo configuration.
-
-### `rule list`
-List routing rules.
-
-### `log [--level LEVEL] [-f]`
-Stream real-time logs. Use `-f` to follow.
-
-## Development
-
-```bash
-pip install -e "agent-harness/[dev]"
-pytest agent-harness/cli_anything/clash_party/tests/
-```
+- System proxy mutation currently supports Windows manual proxy mode.
+- The CLI consumes Clash Party generated work configuration; it does not
+  reimplement the TypeScript override and Smart Core generation pipeline.
+- Runtime logs over the GUI named pipe are not streamed; other REST operations
+  use the real named-pipe backend.

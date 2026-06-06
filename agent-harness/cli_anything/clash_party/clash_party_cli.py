@@ -15,7 +15,11 @@ import yaml
 from cli_anything.clash_party import __version__
 from cli_anything.clash_party.core.config_store import ClashPartyStore
 from cli_anything.clash_party.core.models import CliError, FileMutation
-from cli_anything.clash_party.core.output import error_envelope, success_envelope
+from cli_anything.clash_party.core.output import (
+    error_envelope,
+    redact,
+    success_envelope,
+)
 from cli_anything.clash_party.utils.paths import (
     PathContext,
     resolve_core_path,
@@ -49,7 +53,12 @@ def _save_mutations(ctx: click.Context, entries: list[dict[str, Any]]) -> None:
     """Persist the mutation log to disk."""
     path = _mutations_path(ctx)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(entries, separators=(",", ":")), encoding="utf-8")
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(
+        json.dumps(entries[-20:], separators=(",", ":")),
+        encoding="utf-8",
+    )
+    temporary.replace(path)
 
 
 def _serialize_mutation(mutation: FileMutation) -> dict[str, Any]:
@@ -70,7 +79,12 @@ def _deserialize_mutation(entry: dict[str, Any]) -> FileMutation:
     )
 
 
-def _record_mutation(ctx: click.Context, mutation: FileMutation) -> None:
+def _record_mutation(
+    ctx: click.Context,
+    mutation: FileMutation,
+    *,
+    clear_redo: bool = True,
+) -> None:
     """Push a file mutation onto the persistent undo stack.
 
     The redo stack is cleared (standard undo/redo semantics).
@@ -78,6 +92,8 @@ def _record_mutation(ctx: click.Context, mutation: FileMutation) -> None:
     entries = _load_mutations(ctx)
     entries.append(_serialize_mutation(mutation))
     _save_mutations(ctx, entries)
+    if clear_redo:
+        (Path(ctx.obj["state_dir"]) / "redo_log.json").unlink(missing_ok=True)
 
 
 def _pop_undo(ctx: click.Context) -> FileMutation | None:
@@ -131,7 +147,7 @@ def _pop_redo(ctx: click.Context) -> FileMutation | None:
 
 
 def _write_json(payload: dict[str, object]) -> None:
-    click.echo(json.dumps(payload, separators=(",", ":"), sort_keys=True))
+    click.echo(json.dumps(redact(payload), separators=(",", ":"), sort_keys=True))
 
 
 def _respond(
@@ -140,6 +156,7 @@ def _respond(
     data: Any,
 ) -> None:
     """Emit a success envelope in JSON or a human-readable form."""
+    data = redact(data)
     payload = success_envelope(command, data)
     if ctx.obj["json_output"]:
         _write_json(payload)
@@ -223,6 +240,11 @@ class CliGroup(click.Group):
 @click.option("--state-dir", type=click.Path(path_type=Path), help=_STATE_DIR_HELP)
 @click.option("--core-path", type=click.Path(path_type=Path), help=_CORE_PATH_HELP)
 @click.option("--yes", "assume_yes", is_flag=True, help="Confirm destructive actions.")
+@click.option(
+    "--no-start",
+    is_flag=True,
+    help="Do not start an independent core when unavailable.",
+)
 @click.pass_context
 def cli(
     ctx: click.Context,
@@ -231,6 +253,7 @@ def cli(
     state_dir: Path | None,
     core_path: Path | None,
     assume_yes: bool,
+    no_start: bool,
 ) -> None:
     """Run Clash Party harness commands.
 
@@ -242,6 +265,7 @@ def cli(
     ctx.obj["state_dir"] = resolve_state_dir(explicit=state_dir)
     ctx.obj["core_path"] = resolve_core_path(explicit=core_path)
     ctx.obj["assume_yes"] = assume_yes
+    ctx.obj["no_start"] = no_start
 
     if ctx.invoked_subcommand is None:
         _start_repl(ctx)
@@ -421,7 +445,7 @@ def redo_command(ctx: click.Context) -> None:
             click.echo("Nothing to redo.")
         return
 
-    _record_mutation(ctx, mutation)
+    _record_mutation(ctx, mutation, clear_redo=False)
     mutation.path.write_bytes(mutation.after)
     _respond(ctx, "redo", {"file": str(mutation.path), "action": "redone"})
 
@@ -1361,7 +1385,7 @@ def _dispatch_repl_line(
             if redo_mutation is None:
                 click.echo("Nothing to redo.")
                 return
-            _record_mutation(ctx, redo_mutation)
+            _record_mutation(ctx, redo_mutation, clear_redo=False)
             redo_mutation.path.write_bytes(redo_mutation.after)
             click.echo(f"Redid change to {redo_mutation.path.name}")
 
