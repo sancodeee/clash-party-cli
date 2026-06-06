@@ -194,6 +194,18 @@ def test_resolve_data_dir_uses_platform_default(
         assert result == home.joinpath(*expected_parts)
 
 
+def test_resolve_data_dir_uses_linux_xdg_config_home(tmp_path):
+    xdg_config_home = tmp_path / "xdg-config"
+
+    result = resolve_data_dir(
+        env={"XDG_CONFIG_HOME": str(xdg_config_home)},
+        platform_name="linux",
+        home=tmp_path / "home",
+    )
+
+    assert result == xdg_config_home / "mihomo-party"
+
+
 def test_resolve_state_dir_follows_platform_precedence(tmp_path):
     explicit = tmp_path / "explicit-state"
     environment = {
@@ -318,6 +330,7 @@ def test_path_context_derives_clash_party_files(clash_party_data_dir, tmp_path):
     assert context.data_dir == clash_party_data_dir
     assert context.state_dir == state_dir
     assert context.core_path == core_path
+    assert context.app_config == clash_party_data_dir / "config.yaml"
     assert context.controlled_config == clash_party_data_dir / "mihomo.yaml"
     assert context.profile_config == clash_party_data_dir / "profile.yaml"
     assert context.work_dir == clash_party_data_dir / "work"

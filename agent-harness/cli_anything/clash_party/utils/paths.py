@@ -19,6 +19,7 @@ class PathContext:
     data_dir: Path
     state_dir: Path
     core_path: Path
+    app_config: Path
     controlled_config: Path
     profile_config: Path
     work_dir: Path
@@ -36,6 +37,7 @@ class PathContext:
             data_dir=data_dir,
             state_dir=state_dir,
             core_path=core_path,
+            app_config=data_dir / "config.yaml",
             controlled_config=data_dir / "mihomo.yaml",
             profile_config=data_dir / "profile.yaml",
             work_dir=data_dir / "work",
@@ -84,6 +86,10 @@ def resolve_data_dir(
         return home_dir / "AppData" / "Roaming" / APP_DATA_DIR_NAME
     if platform == "darwin":
         return home_dir / "Library" / "Application Support" / APP_DATA_DIR_NAME
+
+    config_root = environment.get("XDG_CONFIG_HOME")
+    if config_root:
+        return _path(config_root) / APP_DATA_DIR_NAME
     return home_dir / ".config" / APP_DATA_DIR_NAME
 
 
