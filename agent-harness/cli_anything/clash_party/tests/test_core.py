@@ -1,4 +1,5 @@
 import json
+import os
 import runpy
 import sys
 from pathlib import Path
@@ -10,7 +11,16 @@ from click.testing import CliRunner
 
 from cli_anything.clash_party import clash_party_cli
 from cli_anything.clash_party.clash_party_cli import cli
-from cli_anything.clash_party.core.models import CliError
+from cli_anything.clash_party.core.config_store import (
+    ClashPartyStore,
+    atomic_write,
+    get_dot_path,
+)
+from cli_anything.clash_party.core.models import (
+    CliError,
+    ConfigPathError,
+    InvalidConfiguration,
+)
 from cli_anything.clash_party.core.output import error_envelope, success_envelope
 from cli_anything.clash_party.utils.paths import (
     PathContext,
@@ -341,3 +351,159 @@ def test_path_context_derives_clash_party_files(clash_party_data_dir, tmp_path):
     assert yaml.safe_load((clash_party_data_dir / "profile.yaml").read_text())
     for name in ("profiles", "override", "rules", "work", "logs"):
         assert (clash_party_data_dir / name).is_dir()
+
+
+def create_store(clash_party_data_dir: Path, tmp_path: Path) -> ClashPartyStore:
+    context = PathContext.from_roots(
+        data_dir=clash_party_data_dir,
+        state_dir=tmp_path / "state",
+        core_path=tmp_path / "mihomo",
+    )
+    return ClashPartyStore(context)
+
+
+def test_store_exposes_context_and_reads_yaml_by_path_or_name(
+    clash_party_data_dir,
+    tmp_path,
+):
+    store = create_store(clash_party_data_dir, tmp_path)
+
+    assert store.paths.controlled_config == clash_party_data_dir / "mihomo.yaml"
+    assert store.controlled_config == store.paths.controlled_config
+    assert store.profile_config == store.paths.profile_config
+    assert store.app_config == store.paths.app_config
+    assert store.read_yaml("mihomo.yaml")["mode"] == "rule"
+    assert store.read_yaml(store.app_config) == {"app": {"language": "en"}}
+
+    empty = clash_party_data_dir / "empty.yaml"
+    empty.touch()
+    assert store.read_yaml(empty) == {}
+
+
+def test_read_yaml_rejects_non_mapping_root(clash_party_data_dir, tmp_path):
+    store = create_store(clash_party_data_dir, tmp_path)
+    invalid = clash_party_data_dir / "list.yaml"
+    invalid.write_text("- one\n- two\n", encoding="utf-8")
+
+    with pytest.raises(InvalidConfiguration) as exc_info:
+        store.read_yaml(invalid)
+
+    assert exc_info.value.code == "invalid_configuration"
+
+
+def test_get_dot_path_supports_mapping_list_and_scalar_values():
+    configuration = {
+        "proxies": [{"name": "first"}, {"name": "second"}],
+        "tun": {"enable": True},
+    }
+
+    assert get_dot_path(configuration, None) is configuration
+    assert get_dot_path(configuration, "") is configuration
+    assert get_dot_path(configuration, "proxies") == configuration["proxies"]
+    assert get_dot_path(configuration, "tun") == {"enable": True}
+    assert get_dot_path(configuration, "tun.enable") is True
+
+
+@pytest.mark.parametrize("path", ["tun.missing", "tun..enable", ".tun", "tun."])
+def test_get_dot_path_rejects_missing_keys_and_empty_segments(path):
+    with pytest.raises(ConfigPathError) as exc_info:
+        get_dot_path({"tun": {"enable": True}}, path)
+
+    assert exc_info.value.code == "invalid_config_path"
+
+
+def test_get_dot_path_rejects_traversal_through_scalar():
+    with pytest.raises(ConfigPathError):
+        get_dot_path({"mode": "rule"}, "mode.name")
+
+
+def test_set_config_value_parses_yaml_and_preserves_unrelated_fields(
+    clash_party_data_dir,
+    tmp_path,
+):
+    store = create_store(clash_party_data_dir, tmp_path)
+    before = store.controlled_config.read_bytes()
+
+    mutation = store.set_config_value("tun.enable", "true")
+
+    assert mutation.path == store.controlled_config
+    assert mutation.before == before
+    assert mutation.after == store.controlled_config.read_bytes()
+    assert store.read_yaml("mihomo.yaml") == {
+        "mixed-port": 7890,
+        "mode": "rule",
+        "tun": {"enable": True},
+    }
+
+    store.set_config_value("proxies", '[{"name": "local"}]')
+    store.set_config_value("dns", "{enable: true}")
+    assert store.read_yaml("mihomo.yaml")["proxies"] == [{"name": "local"}]
+    assert store.read_yaml("mihomo.yaml")["dns"] == {"enable": True}
+
+
+def test_replace_yaml_does_not_replace_file_when_yaml_is_invalid(
+    clash_party_data_dir,
+    tmp_path,
+):
+    store = create_store(clash_party_data_dir, tmp_path)
+    before = store.profile_config.read_bytes()
+
+    with pytest.raises(InvalidConfiguration):
+        store.replace_yaml(store.profile_config, "items: [")
+
+    assert store.profile_config.read_bytes() == before
+
+
+def test_atomic_write_replaces_contents_and_preserves_mode(tmp_path):
+    target = tmp_path / "config.yaml"
+    target.write_bytes(b"mode: rule\n")
+    target.chmod(0o640)
+    original_mode = os.stat(target).st_mode & 0o777
+
+    mutation = atomic_write(target, b"mode: global\n")
+
+    assert target.read_bytes() == b"mode: global\n"
+    assert mutation.before == b"mode: rule\n"
+    assert mutation.after == b"mode: global\n"
+    assert mutation.path == target
+    assert os.stat(target).st_mode & 0o777 == original_mode
+    assert list(tmp_path.iterdir()) == [target]
+
+
+def test_validate_config_accepts_valid_files(clash_party_data_dir, tmp_path):
+    store = create_store(clash_party_data_dir, tmp_path)
+
+    result = store.validate_config()
+
+    assert result.valid is True
+    assert result.errors == ()
+
+
+def test_validate_config_reports_invalid_documents(clash_party_data_dir, tmp_path):
+    store = create_store(clash_party_data_dir, tmp_path)
+    store.app_config.write_text("- not\n- mapping\n", encoding="utf-8")
+    store.profile_config.write_text("items: {}\n", encoding="utf-8")
+    store.controlled_config.write_text("mode: script\n", encoding="utf-8")
+
+    result = store.validate_config()
+
+    assert result.valid is False
+    assert len(result.errors) == 3
+    assert any("config.yaml" in error for error in result.errors)
+    assert any("profile.items" in error for error in result.errors)
+    assert any("mihomo.mode" in error for error in result.errors)
+
+
+def test_export_config_atomically_copies_controlled_config(
+    clash_party_data_dir,
+    tmp_path,
+):
+    store = create_store(clash_party_data_dir, tmp_path)
+    destination = tmp_path / "export" / "mihomo.yaml"
+
+    mutation = store.export_config(destination)
+
+    assert destination.read_bytes() == store.controlled_config.read_bytes()
+    assert mutation.path == destination
+    assert mutation.before == b""
+    assert mutation.after == store.controlled_config.read_bytes()
