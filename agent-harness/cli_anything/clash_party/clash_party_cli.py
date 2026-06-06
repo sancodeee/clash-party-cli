@@ -192,10 +192,11 @@ class CliGroup(click.Group):
                 click.echo(exc.message, err=True)
             raise SystemExit(exc.exit_code) from exc
         except Exception as exc:
-            # Also catch BackendError (from utils.clash_party_backend)
-            # without importing it at module level (keeps the import
-            # lazy so backend deps are only pulled when used).
-            if type(exc).__name__ == "BackendError":
+            from cli_anything.clash_party.utils.clash_party_backend import (
+                BackendError,
+            )
+
+            if isinstance(exc, BackendError):
                 if ctx.obj.get("json_output"):
                     _write_json(
                         error_envelope(
@@ -687,6 +688,7 @@ def _get_backend(ctx: click.Context):
 
     from cli_anything.clash_party.utils.clash_party_backend import (
         MihomoBackend,
+        discover_named_pipe,
     )
 
     controller = os.environ.get("CLASH_PARTY_CONTROLLER")
@@ -697,6 +699,8 @@ def _get_backend(ctx: click.Context):
         except Exception:
             config = {}
         controller = str(config.get("external-controller", ""))
+    if not controller and Path(ctx.obj["data_dir"]) == resolve_data_dir():
+        controller = discover_named_pipe() or ""
     return MihomoBackend(controller)
 
 

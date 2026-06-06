@@ -7,8 +7,12 @@ configuration, etc.) rather than only editing YAML files.
 
 from __future__ import annotations
 
+import json
+import os
+import re
 import urllib.parse
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import requests
@@ -98,6 +102,88 @@ def _parse_controller(raw: str) -> tuple[str, str]:
     return base, secret
 
 
+def discover_named_pipe(candidates: list[str] | None = None) -> str | None:
+    """Return the first accessible Clash Party named pipe on Windows."""
+    if os.name != "nt" and candidates is None:
+        return None
+    if candidates is None:
+        try:
+            import ctypes
+
+            buffer = ctypes.create_unicode_buffer(32768)
+            result = ctypes.windll.kernel32.GetLogicalDriveStringsW(len(buffer), buffer)
+            del result
+            candidates = [
+                rf"\\.\pipe\MihomoParty\mihomo-{scope}-{user}-{pid}"
+                for scope in ("admin", "user")
+                for user in (
+                    os.environ.get("USERNAME", "default"),
+                    os.environ.get("SESSIONNAME", "default"),
+                )
+                for pid in _electron_process_ids()
+            ]
+        except (AttributeError, OSError):
+            candidates = []
+        try:
+            candidates.extend(
+                str(path)
+                for path in _enumerate_windows_pipes()
+                if "mihomoparty" in str(path).lower()
+            )
+        except OSError:
+            pass
+    for candidate in candidates:
+        if os.name == "nt":
+            try:
+                import ctypes
+
+                if ctypes.windll.kernel32.WaitNamedPipeW(candidate, 1000):
+                    return candidate
+            except (AttributeError, OSError):
+                continue
+        else:
+            try:
+                if Path(candidate).exists():
+                    return candidate
+            except OSError:
+                continue
+    return None
+
+
+def _electron_process_ids() -> list[int]:
+    """Return candidate Clash Party Electron process IDs."""
+    try:
+        import psutil
+
+        return [
+            process.pid
+            for process in psutil.process_iter(["name"])
+            if "clash party" in (process.info.get("name") or "").lower()
+        ]
+    except Exception:
+        return []
+
+
+def _enumerate_windows_pipes() -> list[str]:
+    """Enumerate named pipes using the Windows file namespace."""
+    if os.name != "nt":
+        return []
+    import subprocess
+
+    command = (
+        "[System.IO.Directory]::GetFiles('\\\\.\\pipe\\') | "
+        "Where-Object { $_ -match 'MihomoParty' }"
+    )
+    result = subprocess.run(
+        ["powershell", "-NoProfile", "-Command", command],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=3,
+    )
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+
 class MihomoBackend:
     """HTTP client for the Mihomo external-controller REST API."""
 
@@ -107,7 +193,11 @@ class MihomoBackend:
         *controller* is the raw external-controller value from mihomo.yaml,
         e.g. ``"127.0.0.1:9090"`` or ``"127.0.0.1:9090?secret=xxx"``.
         """
-        self._base_url, self._secret = _parse_controller(controller)
+        self._pipe_path = controller if controller.startswith("\\\\.\\pipe\\") else None
+        if self._pipe_path:
+            self._base_url, self._secret = "http://localhost", ""
+        else:
+            self._base_url, self._secret = _parse_controller(controller)
         self._session = requests.Session()
         self._session.headers["Accept"] = "application/json"
         if self._secret:
@@ -117,6 +207,8 @@ class MihomoBackend:
     # -- helpers ----------------------------------------------------------
 
     def _get(self, path: str) -> dict[str, Any]:
+        if self._pipe_path:
+            return self._pipe_request("GET", path)
         try:
             resp = self._session.get(f"{self._base_url}{path}", timeout=self._timeout)
             resp.raise_for_status()
@@ -129,6 +221,9 @@ class MihomoBackend:
         return resp.json()  # type: ignore[no-any-return]
 
     def _put(self, path: str, body: dict[str, Any] | None = None) -> None:
+        if self._pipe_path:
+            self._pipe_request("PUT", path, body or {})
+            return
         try:
             resp = self._session.put(
                 f"{self._base_url}{path}",
@@ -144,6 +239,9 @@ class MihomoBackend:
             ) from exc
 
     def _delete(self, path: str) -> None:
+        if self._pipe_path:
+            self._pipe_request("DELETE", path)
+            return
         try:
             resp = self._session.delete(
                 f"{self._base_url}{path}", timeout=self._timeout
@@ -157,6 +255,9 @@ class MihomoBackend:
             ) from exc
 
     def _patch(self, path: str, body: dict[str, Any]) -> None:
+        if self._pipe_path:
+            self._pipe_request("PATCH", path, body)
+            return
         try:
             resp = self._session.patch(
                 f"{self._base_url}{path}",
@@ -170,6 +271,104 @@ class MihomoBackend:
             raise BackendError(
                 f"Mihomo API returned {exc.response.status_code}"
             ) from exc
+
+    def _pipe_request(
+        self,
+        method: str,
+        path: str,
+        body: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Send one HTTP request over a Windows named pipe."""
+        if not self._pipe_path:
+            raise BackendError("Named pipe is not configured")
+        payload = json.dumps(body).encode("utf-8") if body is not None else b""
+        headers = [
+            f"{method} {path} HTTP/1.1",
+            "Host: localhost",
+            "Accept: application/json",
+            "Connection: close",
+        ]
+        if self._secret:
+            headers.append(f"Authorization: Bearer {self._secret}")
+        if payload:
+            headers.extend(
+                [
+                    "Content-Type: application/json",
+                    f"Content-Length: {len(payload)}",
+                ]
+            )
+        request = ("\r\n".join(headers) + "\r\n\r\n").encode("ascii") + payload
+        try:
+            with open(self._pipe_path, "r+b", buffering=0) as stream:
+                stream.write(request)
+                raw = self._read_pipe_response(stream)
+        except OSError as exc:
+            raise NotRunningError(self._pipe_path) from exc
+        header, _, response_body = raw.partition(b"\r\n\r\n")
+        status_match = re.match(rb"HTTP/\d\.\d\s+(\d+)", header)
+        status = int(status_match.group(1)) if status_match else 500
+        if status >= 400:
+            raise BackendError(f"Mihomo API returned {status}")
+        if re.search(rb"Transfer-Encoding:\s*chunked", header, re.I):
+            response_body = self._decode_chunked(response_body)
+        if not response_body:
+            return {}
+        try:
+            value = json.loads(response_body.decode("utf-8"))
+        except (UnicodeError, json.JSONDecodeError) as exc:
+            raise BackendError("Mihomo API returned invalid JSON") from exc
+        return value if isinstance(value, dict) else {"data": value}
+
+    @staticmethod
+    def _read_pipe_response(stream: Any) -> bytes:
+        """Read one content-length-delimited HTTP response."""
+        chunks: list[bytes] = []
+        expected: int | None = None
+        chunked = False
+        while True:
+            chunk = stream.read(65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            raw = b"".join(chunks)
+            if b"\r\n\r\n" not in raw:
+                continue
+            header, body = raw.split(b"\r\n\r\n", 1)
+            if expected is None:
+                chunked = bool(
+                    re.search(rb"Transfer-Encoding:\s*chunked", header, re.I)
+                )
+                match = re.search(rb"Content-Length:\s*(\d+)", header, re.I)
+                expected = int(match.group(1)) if match else None
+            if chunked and body.endswith(b"0\r\n\r\n"):
+                break
+            if expected is not None and len(body) >= expected:
+                break
+        return b"".join(chunks)
+
+    @staticmethod
+    def _decode_chunked(body: bytes) -> bytes:
+        """Decode an HTTP chunked response body."""
+        output = bytearray()
+        cursor = 0
+        while cursor < len(body):
+            line_end = body.find(b"\r\n", cursor)
+            if line_end < 0:
+                raise BackendError("Invalid chunked response")
+            size_text = body[cursor:line_end].split(b";", 1)[0]
+            try:
+                size = int(size_text, 16)
+            except ValueError as exc:
+                raise BackendError("Invalid chunk size") from exc
+            cursor = line_end + 2
+            if size == 0:
+                return bytes(output)
+            end = cursor + size
+            if end > len(body):
+                raise BackendError("Incomplete chunked response")
+            output.extend(body[cursor:end])
+            cursor = end + 2
+        raise BackendError("Incomplete chunked response")
 
     # -- version ----------------------------------------------------------
 
@@ -205,7 +404,9 @@ class MihomoBackend:
 
         Selector groups include an ``all`` list and a ``now`` current choice.
         """
-        return self._get("/proxies")  # type: ignore[return-value]
+        response = self._get("/proxies")
+        proxies = response.get("proxies", response)
+        return proxies if isinstance(proxies, dict) else {}
 
     def proxy_groups(self) -> list[ProxyGroup]:
         """Return selector/url-test groups with their current choice."""

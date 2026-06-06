@@ -127,6 +127,7 @@ def test_setup_metadata_defines_scaffold_contracts():
         "ruff>=0.11,<1",
         "mypy>=1.15,<2",
         "types-PyYAML>=6.0,<7",
+        "types-psutil>=6,<8",
         "types-requests>=2.32,<3",
     ]
 
