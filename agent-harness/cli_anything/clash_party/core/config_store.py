@@ -125,12 +125,14 @@ class ClashPartyStore:
         configuration = self.read_yaml(self.controlled_config)
         current: MutableMapping[str, Any] = configuration
         for segment in segments[:-1]:
-            existing = current.get(segment)
-            if existing is None:
+            if segment not in current:
                 child: YamlMapping = {}
                 current[segment] = child
                 current = child
-            elif isinstance(existing, dict):
+                continue
+
+            existing = current[segment]
+            if isinstance(existing, MutableMapping):
                 current = existing
             else:
                 raise ConfigPathError(

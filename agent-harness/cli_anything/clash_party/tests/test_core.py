@@ -441,6 +441,20 @@ def test_set_config_value_parses_yaml_and_preserves_unrelated_fields(
     assert store.read_yaml("mihomo.yaml")["dns"] == {"enable": True}
 
 
+def test_set_config_value_rejects_traversal_through_null_without_mutating_file(
+    clash_party_data_dir,
+    tmp_path,
+):
+    store = create_store(clash_party_data_dir, tmp_path)
+    store.controlled_config.write_bytes(b"mode: rule\ntun: null\n")
+    before = store.controlled_config.read_bytes()
+
+    with pytest.raises(ConfigPathError):
+        store.set_config_value("tun.enable", "true")
+
+    assert store.controlled_config.read_bytes() == before
+
+
 def test_replace_yaml_does_not_replace_file_when_yaml_is_invalid(
     clash_party_data_dir,
     tmp_path,
