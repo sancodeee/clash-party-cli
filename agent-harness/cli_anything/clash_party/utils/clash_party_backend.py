@@ -272,6 +272,24 @@ class MihomoBackend:
                 f"Mihomo API returned {exc.response.status_code}"
             ) from exc
 
+    def _post(self, path: str, body: dict[str, Any] | None = None) -> None:
+        if self._pipe_path:
+            self._pipe_request("POST", path, body)
+            return
+        try:
+            resp = self._session.post(
+                f"{self._base_url}{path}",
+                json=body,
+                timeout=max(self._timeout, 90),
+            )
+            resp.raise_for_status()
+        except requests.ConnectionError as exc:
+            raise NotRunningError(self._base_url) from exc
+        except requests.HTTPError as exc:
+            raise BackendError(
+                f"Mihomo API returned {exc.response.status_code}"
+            ) from exc
+
     def _pipe_request(
         self,
         method: str,
@@ -453,6 +471,10 @@ class MihomoBackend:
         """Return routing rules."""
         return self._get("/rules")  # type: ignore[return-value]
 
+    def set_rule_disabled(self, rule: str, disabled: bool) -> None:
+        """Enable or disable one rule identifier."""
+        self._patch("/rules/disable", {rule: disabled})
+
     def providers(self, provider_type: str) -> dict[str, Any]:
         """Return proxy or rule providers."""
         resource = "proxies" if provider_type == "proxy" else "rules"
@@ -462,6 +484,10 @@ class MihomoBackend:
         """Update one proxy or rule provider."""
         resource = "proxies" if provider_type == "proxy" else "rules"
         self._put(f"/providers/{resource}/{urllib.parse.quote(name)}")
+
+    def upgrade(self) -> None:
+        """Upgrade the running Mihomo core."""
+        self._post("/upgrade")
 
     # -- connections ------------------------------------------------------
 

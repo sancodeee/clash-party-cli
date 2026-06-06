@@ -148,16 +148,47 @@ def resolve_core_path(
     )
     executable_dir = executable_path.parent
     project_root = _path(source_root) if source_root is not None else Path.cwd()
+    runtime_candidates = (
+        _running_install_core_candidates(core_name)
+        if executable is None and source_root is None
+        else ()
+    )
     candidates = (
         executable_dir / "resources" / "sidecar" / core_name,
         executable_dir.parent / "Resources" / "sidecar" / core_name,
         executable_dir / "sidecar" / core_name,
+        Path(environment.get("LOCALAPPDATA", ""))
+        / "Programs"
+        / "Clash Party"
+        / "resources"
+        / "sidecar"
+        / core_name,
         project_root / "extra" / "sidecar" / core_name,
+        *runtime_candidates,
     )
     for candidate in candidates:
         if candidate.exists():
             return candidate
     return candidates[0]
+
+
+def _running_install_core_candidates(core_name: str) -> tuple[Path, ...]:
+    """Return sidecar candidates derived from a running Clash Party process."""
+    try:
+        import psutil
+
+        candidates = []
+        for process in psutil.process_iter(["name", "exe"]):
+            name = (process.info.get("name") or "").lower()
+            executable = process.info.get("exe")
+            if "clash party" not in name or not executable:
+                continue
+            candidates.append(
+                Path(executable).parent / "resources" / "sidecar" / core_name
+            )
+        return tuple(candidates)
+    except Exception:
+        return ()
 
 
 def _path(value: str | Path) -> Path:

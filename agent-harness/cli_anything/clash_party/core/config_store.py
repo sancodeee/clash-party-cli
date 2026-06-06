@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+import requests
 
 from cli_anything.clash_party.core.models import (
     ConfigPathError,
@@ -223,6 +224,45 @@ class ClashPartyStore:
         atomic_write(self.profile_config, self._dump_yaml(config))
         return item
 
+    def add_remote_profile(self, name: str, url: str) -> YamlMapping:
+        """Download and add a remote profile."""
+        content = self._download_profile(url)
+        profile_id = uuid.uuid4().hex[:12]
+        atomic_write(
+            self.paths.data_dir / "profiles" / f"{profile_id}.yaml",
+            content,
+        )
+        config = self.read_yaml(self.profile_config)
+        items = config.setdefault("items", [])
+        if not isinstance(items, list):
+            raise InvalidConfiguration("profile.items must be a list")
+        item: YamlMapping = {
+            "id": profile_id,
+            "type": "remote",
+            "name": name,
+            "url": url,
+        }
+        items.append(item)
+        atomic_write(self.profile_config, self._dump_yaml(config))
+        return item
+
+    def update_remote_profile(self, profile_id: str) -> YamlMapping:
+        """Refresh a remote profile from its URL."""
+        item = next(
+            (entry for entry in self.list_profiles() if entry.get("id") == profile_id),
+            None,
+        )
+        if item is None:
+            raise InvalidConfiguration(f"Profile not found: {profile_id}")
+        url = item.get("url")
+        if item.get("type") != "remote" or not isinstance(url, str):
+            raise InvalidConfiguration("Only remote profiles can be updated")
+        atomic_write(
+            self.paths.data_dir / "profiles" / f"{profile_id}.yaml",
+            self._download_profile(url),
+        )
+        return item
+
     def use_profile(self, profile_id: str) -> FileMutation:
         """Select an existing profile."""
         config = self.read_yaml(self.profile_config)
@@ -317,3 +357,25 @@ class ClashPartyStore:
             allow_unicode=True,
         )
         return text.encode("utf-8")
+
+    @staticmethod
+    def _download_profile(url: str) -> bytes:
+        try:
+            response = requests.get(url, timeout=30)
+            response.raise_for_status()
+        except requests.RequestException as error:
+            raise InvalidConfiguration(
+                f"Subscription download failed: {error}"
+            ) from error
+        content = response.content
+        try:
+            parsed = yaml.safe_load(content)
+        except yaml.YAMLError as error:
+            raise InvalidConfiguration(f"Invalid profile YAML: {error}") from error
+        if not isinstance(parsed, dict):
+            raise InvalidConfiguration("Profile must contain a mapping")
+        if "proxies" not in parsed and "proxy-providers" not in parsed:
+            raise InvalidConfiguration(
+                "Profile must contain proxies or proxy-providers"
+            )
+        return content

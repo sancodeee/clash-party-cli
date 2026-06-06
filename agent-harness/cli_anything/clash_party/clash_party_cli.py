@@ -168,6 +168,13 @@ def _get_store(ctx: click.Context) -> ClashPartyStore:
     return ClashPartyStore(paths)
 
 
+def _get_core_manager(ctx: click.Context):
+    """Build the CLI-owned core manager."""
+    from cli_anything.clash_party.core.core_manager import CoreManager
+
+    return CoreManager(_get_store(ctx).paths)
+
+
 # ---------------------------------------------------------------------------
 # Global options shared by all commands
 # ---------------------------------------------------------------------------
@@ -492,6 +499,83 @@ def status_command(ctx: click.Context) -> None:
 
 
 @cli.group()
+def core() -> None:
+    """Manage a Mihomo process owned by this CLI."""
+
+
+@core.command("start")
+@click.pass_context
+def core_start(ctx: click.Context) -> None:
+    """Start an independent core unless the GUI core is already available."""
+    from cli_anything.clash_party.utils.clash_party_backend import (
+        discover_named_pipe,
+    )
+
+    pipe = (
+        discover_named_pipe()
+        if Path(ctx.obj["data_dir"]) == resolve_data_dir()
+        else None
+    )
+    if pipe:
+        _respond(
+            ctx,
+            "core.start",
+            {"owner": "gui", "controller": pipe, "already_running": True},
+        )
+        return
+    instance = _get_core_manager(ctx).start()
+    _respond(
+        ctx,
+        "core.start",
+        {
+            "owner": "cli",
+            "pid": instance.pid,
+            "controller": instance.controller,
+        },
+    )
+
+
+@core.command("stop")
+@click.pass_context
+def core_stop(ctx: click.Context) -> None:
+    """Stop only the core process owned by this CLI."""
+    instance = _get_core_manager(ctx).stop()
+    _respond(ctx, "core.stop", {"pid": instance.pid})
+
+
+@core.command("restart")
+@click.pass_context
+def core_restart(ctx: click.Context) -> None:
+    """Restart the CLI-owned core."""
+    instance = _get_core_manager(ctx).restart()
+    _respond(
+        ctx,
+        "core.restart",
+        {"pid": instance.pid, "controller": instance.controller},
+    )
+
+
+@core.command("logs")
+@click.option("--lines", default=100, type=click.IntRange(1, 10000))
+@click.pass_context
+def core_logs(ctx: click.Context, lines: int) -> None:
+    """Show recent CLI-owned core logs."""
+    entries = _get_core_manager(ctx).tail_logs(lines)
+    if ctx.obj["json_output"]:
+        _respond(ctx, "core.logs", {"lines": entries})
+    else:
+        click.echo("\n".join(entries))
+
+
+@core.command("upgrade")
+@click.pass_context
+def core_upgrade(ctx: click.Context) -> None:
+    """Ask the running Mihomo instance to upgrade itself."""
+    _get_backend(ctx).upgrade()
+    _respond(ctx, "core.upgrade", {})
+
+
+@cli.group()
 def mode() -> None:
     """Read or change Mihomo outbound mode."""
 
@@ -543,6 +627,104 @@ def _set_tun(ctx: click.Context, enabled: bool) -> None:
         "tun.enable" if enabled else "tun.disable",
         {"enabled": enabled, "runtime_updated": runtime_updated},
     )
+
+
+@cli.group()
+def sysproxy() -> None:
+    """Read or change the Windows system proxy."""
+
+
+@sysproxy.command("status")
+@click.pass_context
+def sysproxy_status(ctx: click.Context) -> None:
+    """Show the Clash Party system proxy setting."""
+    app_config = _get_store(ctx).read_yaml("config.yaml")
+    value = app_config.get("sysProxy", {})
+    enabled = bool(value.get("enable", False)) if isinstance(value, dict) else False
+    _respond(ctx, "sysproxy.status", {"enabled": enabled})
+
+
+def _set_sysproxy(ctx: click.Context, enabled: bool) -> None:
+    from cli_anything.clash_party.core.platform_proxy import (
+        ProxySettings,
+        SystemProxy,
+    )
+
+    store = _get_store(ctx)
+    app_config = store.read_yaml("config.yaml")
+    sys_proxy = app_config.setdefault("sysProxy", {})
+    if not isinstance(sys_proxy, dict):
+        raise CliError("invalid_configuration", "sysProxy must be a mapping", 2)
+    if enabled and sys_proxy.get("mode", "manual") != "manual":
+        raise CliError(
+            "unsupported_proxy_mode",
+            "CLI system proxy enable currently supports manual mode only.",
+            2,
+        )
+    mihomo = store.read_yaml("mihomo.yaml")
+    host = str(sys_proxy.get("host") or "127.0.0.1")
+    port = int(mihomo.get("mixed-port", 7890))
+    bypass_value = sys_proxy.get(
+        "bypass",
+        [
+            "localhost",
+            "127.*",
+            "192.168.*",
+            "10.*",
+            "172.16.*",
+            "172.17.*",
+            "172.18.*",
+            "172.19.*",
+            "172.20.*",
+            "172.21.*",
+            "172.22.*",
+            "172.23.*",
+            "172.24.*",
+            "172.25.*",
+            "172.26.*",
+            "172.27.*",
+            "172.28.*",
+            "172.29.*",
+            "172.30.*",
+            "172.31.*",
+            "<local>",
+        ],
+    )
+    bypass = tuple(str(item) for item in bypass_value)
+    controller = SystemProxy()
+    if enabled:
+        controller.enable(ProxySettings(host=host, port=port, bypass=bypass))
+    else:
+        controller.disable()
+    sys_proxy["enable"] = enabled
+    mutation = store.replace_yaml(
+        store.app_config,
+        yaml.safe_dump(app_config, sort_keys=False, allow_unicode=True),
+    )
+    _record_mutation(ctx, mutation)
+    _respond(
+        ctx,
+        "sysproxy.enable" if enabled else "sysproxy.disable",
+        {
+            "enabled": enabled,
+            "host": host,
+            "port": port,
+        },
+    )
+
+
+@sysproxy.command("enable")
+@click.pass_context
+def sysproxy_enable(ctx: click.Context) -> None:
+    """Enable the configured manual system proxy."""
+    _set_sysproxy(ctx, True)
+
+
+@sysproxy.command("disable")
+@click.pass_context
+def sysproxy_disable(ctx: click.Context) -> None:
+    """Disable the system proxy."""
+    _set_sysproxy(ctx, False)
 
 
 @tun.command("enable")
@@ -600,14 +782,39 @@ def profile_show(ctx: click.Context, profile_id: str) -> None:
 @click.option(
     "--file",
     "source",
-    required=True,
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
 )
+@click.option("--url")
 @click.pass_context
-def profile_add(ctx: click.Context, name: str, source: Path) -> None:
-    """Add a local YAML profile."""
-    item = _get_store(ctx).add_local_profile(name, source)
+def profile_add(
+    ctx: click.Context,
+    name: str,
+    source: Path | None,
+    url: str | None,
+) -> None:
+    """Add a local or remote YAML profile."""
+    if bool(source) == bool(url):
+        raise CliError(
+            "invalid_arguments",
+            "Provide exactly one of --file or --url.",
+            2,
+        )
+    store = _get_store(ctx)
+    item = (
+        store.add_local_profile(name, source)
+        if source is not None
+        else store.add_remote_profile(name, str(url))
+    )
     _respond(ctx, "profile.add", item)
+
+
+@profile.command("update")
+@click.argument("profile_id")
+@click.pass_context
+def profile_update(ctx: click.Context, profile_id: str) -> None:
+    """Refresh a remote profile."""
+    item = _get_store(ctx).update_remote_profile(profile_id)
+    _respond(ctx, "profile.update", item)
 
 
 @profile.command("use")
@@ -692,6 +899,10 @@ def _get_backend(ctx: click.Context):
     )
 
     controller = os.environ.get("CLASH_PARTY_CONTROLLER")
+    if not controller:
+        instance = _get_core_manager(ctx).current()
+        if instance is not None:
+            controller = instance.controller
     if not controller:
         store = _get_store(ctx)
         try:
@@ -852,6 +1063,7 @@ def connection_close(ctx: click.Context, conn_id: str) -> None:
 @click.pass_context
 def connection_close_all(ctx: click.Context) -> None:
     """Close all active connections."""
+    _confirm(ctx, "Close all active connections?")
     backend = _get_backend(ctx)
     backend.close_connections()
     _respond(ctx, "connection.close-all", {})
@@ -918,6 +1130,31 @@ def rule_list(ctx: click.Context) -> None:
         click.echo(
             f"{r.get('type', '?'):12s} {r.get('payload', '?'):40s} → {r.get('proxy', '?')}"
         )
+
+
+def _set_rule_disabled(ctx: click.Context, rule_name: str, disabled: bool) -> None:
+    _get_backend(ctx).set_rule_disabled(rule_name, disabled)
+    _respond(
+        ctx,
+        "rule.disable" if disabled else "rule.enable",
+        {"rule": rule_name, "disabled": disabled},
+    )
+
+
+@rule.command("disable")
+@click.argument("rule_name")
+@click.pass_context
+def rule_disable(ctx: click.Context, rule_name: str) -> None:
+    """Disable one rule identifier."""
+    _set_rule_disabled(ctx, rule_name, True)
+
+
+@rule.command("enable")
+@click.argument("rule_name")
+@click.pass_context
+def rule_enable(ctx: click.Context, rule_name: str) -> None:
+    """Enable one rule identifier."""
+    _set_rule_disabled(ctx, rule_name, False)
 
 
 # ---------------------------------------------------------------------------
