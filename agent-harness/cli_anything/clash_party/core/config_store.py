@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import os
+import shutil
 import stat
 import tempfile
+import uuid
+import zipfile
 from collections.abc import Mapping, MutableMapping
 from pathlib import Path
 from typing import Any
@@ -15,6 +18,7 @@ from cli_anything.clash_party.core.models import (
     ConfigPathError,
     FileMutation,
     InvalidConfiguration,
+    UnsafeArchive,
     ValidationResult,
 )
 from cli_anything.clash_party.utils.paths import PathContext
@@ -184,6 +188,113 @@ class ClashPartyStore:
     def export_config(self, destination: str | Path) -> FileMutation:
         """Atomically copy mihomo.yaml to a destination."""
         return atomic_write(Path(destination), self.controlled_config.read_bytes())
+
+    def list_profiles(self) -> list[YamlMapping]:
+        """Return profile metadata entries."""
+        profiles = self.read_yaml(self.profile_config)
+        items = profiles.get("items", [])
+        if not isinstance(items, list):
+            raise InvalidConfiguration("profile.items must be a list")
+        return [dict(item) for item in items if isinstance(item, Mapping)]
+
+    def add_local_profile(self, name: str, source: Path) -> YamlMapping:
+        """Add a local YAML profile and return its metadata."""
+        content = source.read_bytes()
+        try:
+            parsed = yaml.safe_load(content)
+        except yaml.YAMLError as error:
+            raise InvalidConfiguration(f"Invalid profile YAML: {error}") from error
+        if not isinstance(parsed, dict):
+            raise InvalidConfiguration("Profile must contain a mapping")
+
+        profile_id = uuid.uuid4().hex[:12]
+        target = self.paths.data_dir / "profiles" / f"{profile_id}.yaml"
+        atomic_write(target, content)
+        config = self.read_yaml(self.profile_config)
+        items = config.setdefault("items", [])
+        if not isinstance(items, list):
+            raise InvalidConfiguration("profile.items must be a list")
+        item: YamlMapping = {
+            "id": profile_id,
+            "type": "local",
+            "name": name,
+        }
+        items.append(item)
+        atomic_write(self.profile_config, self._dump_yaml(config))
+        return item
+
+    def use_profile(self, profile_id: str) -> FileMutation:
+        """Select an existing profile."""
+        config = self.read_yaml(self.profile_config)
+        if not any(item.get("id") == profile_id for item in self.list_profiles()):
+            raise InvalidConfiguration(f"Profile not found: {profile_id}")
+        config["current"] = profile_id
+        return atomic_write(self.profile_config, self._dump_yaml(config))
+
+    def remove_profile(self, profile_id: str) -> FileMutation:
+        """Remove profile metadata and its local YAML file."""
+        config = self.read_yaml(self.profile_config)
+        items = config.get("items", [])
+        if not isinstance(items, list):
+            raise InvalidConfiguration("profile.items must be a list")
+        remaining = [
+            item
+            for item in items
+            if not isinstance(item, Mapping) or item.get("id") != profile_id
+        ]
+        if len(remaining) == len(items):
+            raise InvalidConfiguration(f"Profile not found: {profile_id}")
+        config["items"] = remaining
+        if config.get("current") == profile_id:
+            config["current"] = (
+                remaining[0].get("id")
+                if remaining and isinstance(remaining[0], Mapping)
+                else None
+            )
+        mutation = atomic_write(self.profile_config, self._dump_yaml(config))
+        profile_path = self.paths.data_dir / "profiles" / f"{profile_id}.yaml"
+        profile_path.unlink(missing_ok=True)
+        return mutation
+
+    def create_backup(self, destination: Path) -> Path:
+        """Create a ZIP backup compatible with Clash Party data layout."""
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        files = ("config.yaml", "mihomo.yaml", "profile.yaml", "override.yaml")
+        folders = ("themes", "profiles", "override", "rules", "substore")
+        with zipfile.ZipFile(destination, "w", zipfile.ZIP_DEFLATED) as archive:
+            for name in files:
+                path = self.paths.data_dir / name
+                if path.is_file():
+                    archive.write(path, name)
+            for folder in folders:
+                root = self.paths.data_dir / folder
+                if not root.is_dir():
+                    continue
+                for path in root.rglob("*"):
+                    if path.is_file():
+                        archive.write(path, path.relative_to(self.paths.data_dir))
+        return destination
+
+    def restore_backup(self, archive_path: Path) -> list[str]:
+        """Validate and restore a ZIP backup into the data directory."""
+        restored: list[str] = []
+        data_root = self.paths.data_dir.resolve()
+        with zipfile.ZipFile(archive_path) as archive:
+            for info in archive.infolist():
+                member = Path(info.filename)
+                if member.is_absolute() or ".." in member.parts:
+                    raise UnsafeArchive(f"Unsafe backup entry: {info.filename}")
+                target = (data_root / member).resolve()
+                if target != data_root and data_root not in target.parents:
+                    raise UnsafeArchive(f"Unsafe backup entry: {info.filename}")
+                if info.is_dir():
+                    target.mkdir(parents=True, exist_ok=True)
+                    continue
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with archive.open(info) as source, target.open("wb") as output:
+                    shutil.copyfileobj(source, output)
+                restored.append(info.filename)
+        return restored
 
     def _resolve_path(self, path_or_name: str | Path) -> Path:
         path = Path(path_or_name)

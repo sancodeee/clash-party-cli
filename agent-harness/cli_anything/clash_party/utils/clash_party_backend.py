@@ -156,6 +156,21 @@ class MihomoBackend:
                 f"Mihomo API returned {exc.response.status_code}"
             ) from exc
 
+    def _patch(self, path: str, body: dict[str, Any]) -> None:
+        try:
+            resp = self._session.patch(
+                f"{self._base_url}{path}",
+                json=body,
+                timeout=self._timeout,
+            )
+            resp.raise_for_status()
+        except requests.ConnectionError as exc:
+            raise NotRunningError(self._base_url) from exc
+        except requests.HTTPError as exc:
+            raise BackendError(
+                f"Mihomo API returned {exc.response.status_code}"
+            ) from exc
+
     # -- version ----------------------------------------------------------
 
     def version(self) -> dict[str, Any]:
@@ -178,6 +193,10 @@ class MihomoBackend:
         if path is not None:
             body["path"] = path
         self._put("/configs", body)
+
+    def patch_configs(self, patch: dict[str, Any]) -> None:
+        """Patch the running Mihomo configuration."""
+        self._patch("/configs", patch)
 
     # -- proxies ----------------------------------------------------------
 
@@ -232,6 +251,16 @@ class MihomoBackend:
     def rules(self) -> dict[str, list[dict[str, Any]]]:
         """Return routing rules."""
         return self._get("/rules")  # type: ignore[return-value]
+
+    def providers(self, provider_type: str) -> dict[str, Any]:
+        """Return proxy or rule providers."""
+        resource = "proxies" if provider_type == "proxy" else "rules"
+        return self._get(f"/providers/{resource}")
+
+    def update_provider(self, provider_type: str, name: str) -> None:
+        """Update one proxy or rule provider."""
+        resource = "proxies" if provider_type == "proxy" else "rules"
+        self._put(f"/providers/{resource}/{urllib.parse.quote(name)}")
 
     # -- connections ------------------------------------------------------
 

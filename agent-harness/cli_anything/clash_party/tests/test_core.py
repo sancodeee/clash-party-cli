@@ -979,6 +979,123 @@ class TestBackendCliErrorHandling:
         assert result.exit_code != 0
         assert "not configured" in result.output.lower()
 
+
+class TestFullManagementCommands:
+    """Tests for file-backed full management commands."""
+
+    def test_mode_set_updates_mihomo_yaml(self, clash_party_data_dir, tmp_path):
+        args = _cli_args(
+            clash_party_data_dir,
+            tmp_path,
+            "--json",
+            "mode",
+            "set",
+            "direct",
+        )
+        result = CliRunner().invoke(cli, args)
+
+        assert result.exit_code == 0
+        assert (
+            yaml.safe_load(
+                (clash_party_data_dir / "mihomo.yaml").read_text(encoding="utf-8")
+            )["mode"]
+            == "direct"
+        )
+
+    def test_tun_enable_updates_nested_config(self, clash_party_data_dir, tmp_path):
+        args = _cli_args(
+            clash_party_data_dir,
+            tmp_path,
+            "--json",
+            "tun",
+            "enable",
+        )
+        result = CliRunner().invoke(cli, args)
+
+        assert result.exit_code == 0
+        assert (
+            yaml.safe_load(
+                (clash_party_data_dir / "mihomo.yaml").read_text(encoding="utf-8")
+            )["tun"]["enable"]
+            is True
+        )
+
+    def test_profile_add_use_remove_workflow(self, clash_party_data_dir, tmp_path):
+        source = tmp_path / "local.yaml"
+        source.write_text(
+            "proxies: []\nproxy-groups: []\nrules: []\n",
+            encoding="utf-8",
+        )
+        runner = CliRunner()
+        base = [
+            "--data-dir",
+            str(clash_party_data_dir),
+            "--state-dir",
+            str(tmp_path / "state"),
+            "--json",
+        ]
+
+        added = runner.invoke(
+            cli,
+            [*base, "profile", "add", "--name", "Local", "--file", str(source)],
+        )
+        assert added.exit_code == 0
+        profile_id = json.loads(added.output)["data"]["id"]
+
+        selected = runner.invoke(cli, [*base, "profile", "use", profile_id])
+        assert selected.exit_code == 0
+        profile_config = yaml.safe_load(
+            (clash_party_data_dir / "profile.yaml").read_text(encoding="utf-8")
+        )
+        assert profile_config["current"] == profile_id
+
+        removed = runner.invoke(cli, [*base, "--yes", "profile", "remove", profile_id])
+        assert removed.exit_code == 0
+        assert not (clash_party_data_dir / "profiles" / f"{profile_id}.yaml").exists()
+
+    def test_backup_restore_rejects_parent_traversal(
+        self, clash_party_data_dir, tmp_path
+    ):
+        import zipfile
+
+        archive = tmp_path / "bad.zip"
+        with zipfile.ZipFile(archive, "w") as zip_file:
+            zip_file.writestr("../outside.txt", "bad")
+
+        args = _cli_args(
+            clash_party_data_dir,
+            tmp_path,
+            "--json",
+            "--yes",
+            "backup",
+            "restore",
+            str(archive),
+        )
+        result = CliRunner().invoke(cli, args)
+
+        assert result.exit_code == 2
+        assert "unsafe_archive" in result.output
+
+
+class TestProviderBackend:
+    """Tests for provider update endpoints."""
+
+    def test_list_and_update_proxy_provider(self, httpserver):
+        from cli_anything.clash_party.utils.clash_party_backend import (
+            MihomoBackend,
+        )
+
+        httpserver.expect_request("/providers/proxies").respond_with_json(
+            {"providers": {"main": {"name": "main", "type": "Proxy"}}}
+        )
+        httpserver.expect_request(
+            "/providers/proxies/main", method="PUT"
+        ).respond_with_data(b"", status=204)
+        backend = MihomoBackend(f"127.0.0.1:{httpserver.port}", timeout=1)
+
+        assert "main" in backend.providers("proxy")["providers"]
+        backend.update_provider("proxy", "main")
+
     def test_reload_shows_error_when_no_controller(
         self, clash_party_data_dir, tmp_path
     ):

@@ -214,6 +214,7 @@ class CliGroup(click.Group):
 @click.option("--data-dir", type=click.Path(path_type=Path), help=_DATA_DIR_HELP)
 @click.option("--state-dir", type=click.Path(path_type=Path), help=_STATE_DIR_HELP)
 @click.option("--core-path", type=click.Path(path_type=Path), help=_CORE_PATH_HELP)
+@click.option("--yes", "assume_yes", is_flag=True, help="Confirm destructive actions.")
 @click.pass_context
 def cli(
     ctx: click.Context,
@@ -221,6 +222,7 @@ def cli(
     data_dir: Path | None,
     state_dir: Path | None,
     core_path: Path | None,
+    assume_yes: bool,
 ) -> None:
     """Run Clash Party harness commands.
 
@@ -231,6 +233,7 @@ def cli(
     ctx.obj["data_dir"] = resolve_data_dir(explicit=data_dir)
     ctx.obj["state_dir"] = resolve_state_dir(explicit=state_dir)
     ctx.obj["core_path"] = resolve_core_path(explicit=core_path)
+    ctx.obj["assume_yes"] = assume_yes
 
     if ctx.invoked_subcommand is None:
         _start_repl(ctx)
@@ -437,6 +440,237 @@ def info_command(ctx: click.Context) -> None:
     _respond(ctx, "info", info_data)
 
 
+def _try_patch_runtime(ctx: click.Context, patch: dict[str, Any]) -> bool:
+    """Patch a running controller when one is configured and reachable."""
+    from cli_anything.clash_party.utils.clash_party_backend import BackendError
+
+    try:
+        store = _get_store(ctx)
+        config_data = store.read_yaml(store.controlled_config)
+        if not config_data.get("external-controller"):
+            return False
+        _get_backend(ctx).patch_configs(patch)
+        return True
+    except BackendError:
+        return False
+
+
+def _confirm(ctx: click.Context, message: str) -> None:
+    """Require confirmation for a destructive operation."""
+    if ctx.obj.get("assume_yes"):
+        return
+    if ctx.obj.get("json_output"):
+        raise CliError("confirmation_required", f"{message}; pass --yes", 5)
+    if not click.confirm(message):
+        raise CliError("confirmation_required", "Operation cancelled.", 5)
+
+
+@cli.command("status")
+@click.pass_context
+def status_command(ctx: click.Context) -> None:
+    """Show local configuration and running-controller status."""
+    store = _get_store(ctx)
+    config_data = store.read_yaml(store.controlled_config)
+    profiles = store.read_yaml(store.profile_config)
+    backend_data: dict[str, Any] = {"available": False}
+    try:
+        version = _get_backend(ctx).version()
+        backend_data = {"available": True, "version": version}
+    except Exception:
+        pass
+    _respond(
+        ctx,
+        "status",
+        {
+            "mode": config_data.get("mode", "rule"),
+            "tun": bool(config_data.get("tun", {}).get("enable", False)),
+            "profile": profiles.get("current"),
+            "backend": backend_data,
+        },
+    )
+
+
+@cli.group()
+def mode() -> None:
+    """Read or change Mihomo outbound mode."""
+
+
+@mode.command("get")
+@click.pass_context
+def mode_get(ctx: click.Context) -> None:
+    """Show the configured outbound mode."""
+    current = _get_store(ctx).read_yaml("mihomo.yaml").get("mode", "rule")
+    _respond(ctx, "mode.get", {"mode": current})
+
+
+@mode.command("set")
+@click.argument("value", type=click.Choice(["rule", "global", "direct"]))
+@click.pass_context
+def mode_set(ctx: click.Context, value: str) -> None:
+    """Set outbound mode and patch a running controller when possible."""
+    mutation = _get_store(ctx).set_config_value("mode", value)
+    _record_mutation(ctx, mutation)
+    runtime_updated = _try_patch_runtime(ctx, {"mode": value})
+    _respond(
+        ctx,
+        "mode.set",
+        {"mode": value, "runtime_updated": runtime_updated},
+    )
+
+
+@cli.group()
+def tun() -> None:
+    """Read or change TUN configuration."""
+
+
+@tun.command("status")
+@click.pass_context
+def tun_status(ctx: click.Context) -> None:
+    """Show configured TUN state."""
+    config_data = _get_store(ctx).read_yaml("mihomo.yaml")
+    enabled = bool(config_data.get("tun", {}).get("enable", False))
+    _respond(ctx, "tun.status", {"enabled": enabled})
+
+
+def _set_tun(ctx: click.Context, enabled: bool) -> None:
+    store = _get_store(ctx)
+    mutation = store.set_config_value("tun.enable", "true" if enabled else "false")
+    _record_mutation(ctx, mutation)
+    runtime_updated = _try_patch_runtime(ctx, {"tun": {"enable": enabled}})
+    _respond(
+        ctx,
+        "tun.enable" if enabled else "tun.disable",
+        {"enabled": enabled, "runtime_updated": runtime_updated},
+    )
+
+
+@tun.command("enable")
+@click.pass_context
+def tun_enable(ctx: click.Context) -> None:
+    """Enable TUN in mihomo.yaml."""
+    _set_tun(ctx, True)
+
+
+@tun.command("disable")
+@click.pass_context
+def tun_disable(ctx: click.Context) -> None:
+    """Disable TUN in mihomo.yaml."""
+    _set_tun(ctx, False)
+
+
+@cli.group()
+def profile() -> None:
+    """Manage Clash Party profiles."""
+
+
+@profile.command("list")
+@click.pass_context
+def profile_list(ctx: click.Context) -> None:
+    """List profile metadata."""
+    store = _get_store(ctx)
+    current = store.read_yaml(store.profile_config).get("current")
+    _respond(
+        ctx,
+        "profile.list",
+        {"current": current, "items": store.list_profiles()},
+    )
+
+
+@profile.command("show")
+@click.argument("profile_id")
+@click.pass_context
+def profile_show(ctx: click.Context, profile_id: str) -> None:
+    """Show one profile metadata record."""
+    item = next(
+        (
+            entry
+            for entry in _get_store(ctx).list_profiles()
+            if entry.get("id") == profile_id
+        ),
+        None,
+    )
+    if item is None:
+        raise CliError("profile_not_found", f"Profile not found: {profile_id}", 2)
+    _respond(ctx, "profile.show", item)
+
+
+@profile.command("add")
+@click.option("--name", required=True)
+@click.option(
+    "--file",
+    "source",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+)
+@click.pass_context
+def profile_add(ctx: click.Context, name: str, source: Path) -> None:
+    """Add a local YAML profile."""
+    item = _get_store(ctx).add_local_profile(name, source)
+    _respond(ctx, "profile.add", item)
+
+
+@profile.command("use")
+@click.argument("profile_id")
+@click.pass_context
+def profile_use(ctx: click.Context, profile_id: str) -> None:
+    """Select a profile."""
+    mutation = _get_store(ctx).use_profile(profile_id)
+    _record_mutation(ctx, mutation)
+    _respond(ctx, "profile.use", {"id": profile_id})
+
+
+@profile.command("remove")
+@click.argument("profile_id")
+@click.pass_context
+def profile_remove(ctx: click.Context, profile_id: str) -> None:
+    """Remove a profile after confirmation."""
+    _confirm(ctx, f"Remove profile {profile_id}?")
+    mutation = _get_store(ctx).remove_profile(profile_id)
+    _record_mutation(ctx, mutation)
+    _respond(ctx, "profile.remove", {"id": profile_id})
+
+
+@cli.group()
+def backup() -> None:
+    """Create, list, and restore local backups."""
+
+
+@backup.command("create")
+@click.argument("destination", type=click.Path(path_type=Path))
+@click.pass_context
+def backup_create(ctx: click.Context, destination: Path) -> None:
+    """Create a local ZIP backup."""
+    path = _get_store(ctx).create_backup(destination)
+    _respond(ctx, "backup.create", {"path": str(path)})
+
+
+@backup.command("list")
+@click.argument(
+    "directory",
+    required=False,
+    type=click.Path(file_okay=False, path_type=Path),
+)
+@click.pass_context
+def backup_list(ctx: click.Context, directory: Path | None) -> None:
+    """List ZIP backups in a directory."""
+    root = directory or Path.cwd()
+    items = sorted(str(path) for path in root.glob("*.zip"))
+    _respond(ctx, "backup.list", {"items": items})
+
+
+@backup.command("restore")
+@click.argument(
+    "archive",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+)
+@click.pass_context
+def backup_restore(ctx: click.Context, archive: Path) -> None:
+    """Restore a validated local ZIP backup."""
+    _confirm(ctx, f"Restore backup {archive}?")
+    restored = _get_store(ctx).restore_backup(archive)
+    _respond(ctx, "backup.restore", {"files": restored})
+
+
 # ---------------------------------------------------------------------------
 # shared backend helper
 # ---------------------------------------------------------------------------
@@ -520,6 +754,35 @@ def proxy_switch(ctx: click.Context, group: str, name: str) -> None:
     backend = _get_backend(ctx)
     backend.switch_proxy(group, name)
     _respond(ctx, "proxy.switch", {"group": group, "to": name})
+
+
+@cli.group()
+def provider() -> None:
+    """Inspect and update Mihomo providers."""
+
+
+@provider.command("list")
+@click.argument(
+    "provider_type",
+    required=False,
+    default="proxy",
+    type=click.Choice(["proxy", "rule"]),
+)
+@click.pass_context
+def provider_list(ctx: click.Context, provider_type: str) -> None:
+    """List proxy or rule providers."""
+    data = _get_backend(ctx).providers(provider_type)
+    _respond(ctx, "provider.list", data)
+
+
+@provider.command("update")
+@click.argument("provider_type", type=click.Choice(["proxy", "rule"]))
+@click.argument("name")
+@click.pass_context
+def provider_update(ctx: click.Context, provider_type: str, name: str) -> None:
+    """Update one proxy or rule provider."""
+    _get_backend(ctx).update_provider(provider_type, name)
+    _respond(ctx, "provider.update", {"type": provider_type, "name": name})
 
 
 # ---------------------------------------------------------------------------

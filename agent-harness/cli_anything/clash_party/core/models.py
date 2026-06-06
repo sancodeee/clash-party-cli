@@ -29,6 +29,14 @@ class ConfigPathError(InvalidConfiguration):
         self.code = "invalid_config_path"
 
 
+class UnsafeArchive(InvalidConfiguration):
+    """Report a backup archive containing unsafe entries."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.code = "unsafe_archive"
+
+
 @dataclass(frozen=True)
 class FileMutation:
     """Describe the byte-level result of a file replacement."""
