@@ -27,8 +27,7 @@ setup(
     },
     entry_points={
         "console_scripts": [
-            "cli-anything-clash-party="
-            "cli_anything.clash_party.clash_party_cli:main",
+            "cli-anything-clash-party=cli_anything.clash_party.clash_party_cli:main",
         ],
     },
 )

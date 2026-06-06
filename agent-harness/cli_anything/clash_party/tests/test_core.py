@@ -92,8 +92,7 @@ def test_setup_metadata_defines_scaffold_contracts():
     assert metadata["packages"] == ["cli_anything.clash_party"]
     assert metadata["entry_points"] == {
         "console_scripts": [
-            "cli-anything-clash-party="
-            "cli_anything.clash_party.clash_party_cli:main",
+            "cli-anything-clash-party=cli_anything.clash_party.clash_party_cli:main",
         ],
     }
     assert metadata["install_requires"] == [
